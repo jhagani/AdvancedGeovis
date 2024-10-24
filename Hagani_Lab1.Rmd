@@ -1,0 +1,161 @@
+---
+title: "Lab 1"
+author: "J Hagani"
+date: "2024-11-3"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(raster)
+library(terra)
+library(randomForest)
+library(ggspatial)
+
+axis <- read.csv("Axisaxis_simulation_10.csv")
+axis$EVI <- as.numeric(axis$EVI)
+axis <- axis[complete.cases(axis), ] 
+```
+
+## The Question
+The goal of this analysis is to model the density of spotted deer (*Axis axis*) in Southeast Asia. The spotted deer is a primary prey species for tigers (*Panthera tigris*) - understanding the distribution & density of their prey will help conservationists determine which areas are best suited for restoring these carnivores. 
+
+## The Data
+I compiled estimations of spotted deer densities from published literature. Using density estimates and their associated standard errors, I simulated random points in each protected area where the estimation was made. In each protected area, I simulated *n* random points, where *n* is equal to the area of the protected area/10. This helped reduce the potential for spatial autocorrelation. For now, I'm interested in examining the relationship between spotted deer densities and a couple environmental predictors. Those are: elevation, enhanced vegetation index (EVI; a measure of greenness), mean annual temperature, and mean annual precipitation. I extracted values for those four predictors at each random point. 
+
+As a result, my dataframe of interest has 4 columns: density, EVI, temperature, and precipitation.
+
+```{r, echo = FALSE}
+head(axis)
+```
+
+## The Analysis
+We can take a quick look at some scatter plots to see if there are any clear relationships between spotted deer densities and each of our predictor variables. 
+
+```{r}
+ggplot(axis, aes(x = EVI, y = Density)) + 
+  geom_point() + 
+  theme_classic() +
+  ylab("Density (ind/km^2)") + xlab("Enhanced Vegetation Index") + 
+  ggtitle("Relationship between EVI and Spotted Deer Densities")
+```
+
+```{r}
+ggplot(axis, aes(x = Elevation, y = Density)) + 
+  geom_point() + 
+  theme_classic() +
+  ylab("Density (ind/km^2)") + xlab("Elevation (m)") + 
+  ggtitle("Relationship between Elevation and Spotted Deer Densities")
+```
+
+```{r}
+ggplot(axis, aes(x = EVI, y = MeanTemp)) + 
+  geom_point() + 
+  theme_classic() +
+  ylab("Density (ind/km^2)") + xlab("Mean Annual Temperature (C)") + 
+  ggtitle("Relationship between Mean Annual Temperature and Spotted Deer Densities")
+```
+
+```{r}
+ggplot(axis, aes(x = EVI, y = Precip)) + 
+  geom_point() + 
+  theme_classic() +
+  ylab("Density (ind/km^2)") + xlab("Mean Annual Precipitation (mm)") + 
+  ggtitle("Relationship between Mean Annual Precipitation and Spotted Deer Densities")
+```
+
+At first glance, no real clear pattern emerges. Perhaps there's a positive relationship between density and elevation, maybe an inverse relationship between density and mean annual temperature. It's hard to tell, but no matter, that's what modeling is for. We're going to use a machine learning algorithm - Random Forest - to model the relationship between density and our environmental predictors. Random Forest models generate a set of decision trees (hence, "forest"), and averages them to make predictions. As a machine learning model it improves with each iteration, making it very powerful and good at handling non-linear relationships. 
+
+Here's a simple random forest model with 500 trees. We're first going to randomly split the data with 70% used to train the model, and 30% put aside for testing:
+
+```{r}
+set.seed(13) #for reproducability# 
+train_index <- sample(1:nrow(axis), size = 0.7 * nrow(axis)) 
+train <- axis[train_index, ]
+test <- axis[-train_index, ]
+rf <- randomForest(Density ~ EVI + Elevation + MeanTemp + Precip, data = train, 
+                   num.trees = 500, importance = TRUE)
+```
+
+We can look at the outputs of the Random Forest and see which variables are most important
+
+```{r}
+rf
+head(rf$importance)
+```
+
+Just by comparing the values relative to each other, it looks like the climatic variables (MeanTemp & Precip) are more important than EVI and Elevation. We can now also use the Random Forest to predict our test data and see how well the model performed. 
+
+```{r}
+#Here's a function for calculating two performance metrics, R^2 and RMSE#
+mets <- function(y, yhat){
+  mse <- mean((y - yhat)^2)
+  rmse <-sqrt(mse)
+  corr <- cor(y, yhat, method = "pearson")
+  rsquare <- corr*corr
+  return(list(rmse = rmse, rsquare = rsquare))
+}
+
+pred <- predict(rf, test)
+test$pred <- pred
+mets(test$Density, test$pred)
+```
+
+The R^2 is 0.555, which is not great (but not bad!), and the RMSE is 15.278, which is also a little high for my liking. But for now, we're just going to stick with it. The final part of the analysis is to use our models to predict spotted deer density across space - including non-sampled areas. To do that, I'm going to bring in rasters for each of my four predictors and apply the model to them. 
+
+```{r}
+EVI <- raster("EVI_RS.tif")
+Elevation <- raster("Elevation_RS.tif")
+MeanTemp <- raster("MeanTemp.tif")
+Precip <- raster("Precip_RS.tif")
+```
+We can then stack the rasters as long as they have the same spatial resolution and extent (in this case we do). I then rename the rasters so that the names match the column names in my dataset. It's important that the raster names and model covariates match exactly.
+
+```{r}
+predictors <- stack(MeanTemp, EVI, Elevation, Precip)
+names(predictors) <- list("MeanTemp", "EVI", "Elevation", "Precip")
+```
+
+Next, I find the extent of the rasters and manually set that to the variable "ext". I'll need it when I predict across space.
+```{r}
+ext(predictors$MeanTemp)
+ext <- extent(c(-10410760.4324361, 11259239.5675639, -2540184.91872646, 
+                8966815.08127354)) #xmin, xmax, ymin, ymax#
+```
+
+Now I'm ready to make predictions across space, using the "predict" function in the "raster" or "terra" package. Essentially, for every pixel in my predictor rasters, the function is using the random forest model "rf" to estimate spotted deer density. Running this function can take 10-15 minutes, so I'm going to mask it out but you can see the code below.
+```{r}
+#map1 <- raster::predict(predictors, rf, ext = ext, progress = "windows")#
+```
+
+## The Final Output
+We're almost there. I'm going to increase the resolution from 1km to 10km for mapping, simply because the raster is so large. Then with some maneuvering, we can map the final predicted output!
+
+```{r}
+#Set the coordinate reference system - I'm using Asia Lambert Conformal Conic#
+map1 <- raster("map1.tif")
+crs(map1) <- "+proj=lcc +lat_0=0 +lon_0=105 +lat_1=30 +lat_2=62 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +type=crs"
+map2 <- terra::aggregate(map1, 10) #increases resolution 10x#
+
+#Covert the raster to a rasterstack, then a dataframe for plotting#
+map2_rs <- stack(map2)
+map2_df <- as.data.frame(map2_rs, xy = TRUE) %>%
+  #Remove NAs#
+  na.omit() 
+
+#Time to map#
+density_map <- ggplot(data = map2_df) +
+  geom_raster(aes(x = x, y = y, fill = map1)) +
+  scale_fill_distiller(palette = "RdYlGn", name = "Density (ind/km^2)") + 
+  theme_void() +
+  theme(legend.position = c(0.9, 0.5)) + 
+  guides(fill = guide_colorbar(title.position = "top")) +
+  annotation_scale(location = "bl", width_hint = 0.2, pad_y = unit(1, "cm")) + 
+  annotation_north_arrow(location = "bl", pad_y = unit(1.5, "cm"), 
+                         pad_x = unit(1, "cm"),
+                         style = north_arrow_fancy_orienteering) +
+  ggtitle("Predicted Density (ind/km^2) of Spotted Deer in Southeast Asia") +
+  theme(plot.title = element_text(hjust = 0.5))
+density_map
+```
